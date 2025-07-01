@@ -1,7 +1,7 @@
 #
-# GitHub Actions - 手动编译 OpenWrt (最终修正版)
+# GitHub Actions - 手动编译 OpenWrt (最终修正版 v2)
 #
-# 此版本已修复 actions/upload-artifact@v3 弃用问题，并配置为仅手动触发。
+# 此版本已修复 quilt-utils 包名问题和 upload-artifact 版本问题。
 #
 # 使用方法:
 # 1. 将此文件完整内容保存到你仓库的 .github/workflows/build-openwrt.yml。
@@ -50,11 +50,12 @@ jobs:
       run: |
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
         sudo -E apt-get update
+        # 关键修复：将 quilt-utils 修改为 quilt
         sudo -E apt-get -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
         libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
-        mkisofs msmtp nano quilt-utils rsync scons subversion swig texinfo uglifyjs upx-ucl unzip vim \
+        mkisofs msmtp nano quilt rsync scons subversion swig texinfo uglifyjs upx-ucl unzip vim \
         wget xmlto xxd zlib1g-dev
         sudo -E apt-get -y autoremove --purge
         sudo -E apt-get clean
@@ -69,11 +70,9 @@ jobs:
         
     - name: Load custom configuration a.k.a. 加载自定义配置和脚本
       run: |
-        # 拷贝你的配置文件（lede.config），并将其重命名为 OpenWrt 编译所需的 .config 文件
         if [ -e ../${{ env.CONFIG_FILE }} ]; then
           mv ../${{ env.CONFIG_FILE }} openwrt/.config
         fi
-        # 如果存在 diy-part1.sh 脚本，则运行它（通常用于添加自定义 feeds）
         if [ -e ../${{ env.DIY_PART1_SH }} ]; then
           chmod +x ../${{ env.DIY_PART1_SH }}
           cd openwrt
@@ -85,7 +84,6 @@ jobs:
         cd openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        # 如果存在 diy-part2.sh 脚本，则运行它（通常用于修改软件包）
         if [ -e ../${{ env.DIY_PART2_SH }} ]; then
           chmod +x ../${{ env.DIY_PART2_SH }}
           ../${{ env.DIY_PART2_SH }}
@@ -113,23 +111,19 @@ jobs:
         cd openwrt
         echo -e "$(nproc) thread compile"
         make -j$(nproc) V=s
-        # 为后续步骤设置输出变量
         echo "FIRMWARE_PATH=openwrt/bin/targets" >> $GITHUB_ENV
 
     - name: Organize files and upload artifacts a.k.a. 整理文件并上传
       run: |
         cd ${{ env.FIRMWARE_PATH }}/*/*
-        # 删除不需要的文件，减小大小
         rm -rf packages
         rm -rf feeds.buildinfo
         rm -rf version.buildinfo
         rm -rf sha256sums
         rm -rf config.buildinfo
-        # 创建一个 ZIP 压缩包
         zip -r ${{ env.FIRMWARE_NAME }}.zip .
 
     - name: Upload firmware to artifacts a.k.a. 上传固件到 Artifacts
-      # 关键修复：使用 v4 版本来上传
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.FIRMWARE_NAME }}
