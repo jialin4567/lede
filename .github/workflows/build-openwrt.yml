@@ -1,7 +1,5 @@
 #
-# GitHub Actions - 手动编译 OpenWrt (最终修正版 v2)
-#
-# 此版本已修复 quilt-utils 包名问题和 upload-artifact 版本问题。
+# GitHub Actions - 手动编译 OpenWrt (最终修正版 v3 - 已修复配置覆盖问题)
 #
 # 使用方法:
 # 1. 将此文件完整内容保存到你仓库的 .github/workflows/build-openwrt.yml。
@@ -50,7 +48,6 @@ jobs:
       run: |
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
         sudo -E apt-get update
-        # 关键修复：将 quilt-utils 修改为 quilt
         sudo -E apt-get -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
         bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
         git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
@@ -70,11 +67,12 @@ jobs:
         
     - name: Load custom configuration a.k.a. 加载自定义配置和脚本
       run: |
-        if [ -e ../${{ env.CONFIG_FILE }} ]; then
-          mv ../${{ env.CONFIG_FILE }} openwrt/.config
+        # 这一步会将你仓库根目录的 lede.config 文件，正确地移动到 openwrt 源码目录并重命名为 .config
+        if [ -e ${{ env.CONFIG_FILE }} ]; then
+          mv ${{ env.CONFIG_FILE }} openwrt/.config
         fi
-        if [ -e ../${{ env.DIY_PART1_SH }} ]; then
-          chmod +x ../${{ env.DIY_PART1_SH }}
+        if [ -e ${{ env.DIY_PART1_SH }} ]; then
+          chmod +x ${{ env.DIY_PART1_SH }}
           cd openwrt
           ../${{ env.DIY_PART1_SH }}
         fi
@@ -89,10 +87,10 @@ jobs:
           ../${{ env.DIY_PART2_SH }}
         fi
 
-    - name: Generate .config from diff a.k.a. 生成 .config 文件
-      run: |
-        cd openwrt
-        make defconfig
+    # =================================================================
+    #   已删除 "Generate .config from diff" 步骤，因为它会覆盖用户的配置。
+    #   主编译命令 'make' 会自动处理 .config 文件。
+    # =================================================================
 
     - name: SSH connection to runner a.k.a. SSH 连接到 Runner (用于调试)
       uses: P3TERX/ssh2actions@v1.0.0
@@ -110,6 +108,7 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
+        # make 命令会自动检查并使用 .config 文件
         make -j$(nproc) V=s
         echo "FIRMWARE_PATH=openwrt/bin/targets" >> $GITHUB_ENV
 
