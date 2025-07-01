@@ -1,16 +1,16 @@
+# =================================================================================
+#  GitHub Actions - 编译 OpenWrt (高效缓存 & 最佳实践优化版)
 #
-# GitHub Actions - 手动编译 OpenWrt (最终修正版 v3 - 已修复配置覆盖问题)
-#
-# 使用方法:
-# 1. 将此文件完整内容保存到你仓库的 .github/workflows/build-openwrt.yml。
-# 2. 确保你的 lede.config 文件在仓库的根目录。
-# 3. 前往 GitHub 仓库的 "Actions" 页面，选择 "Build OpenWrt"，点击 "Run workflow" 开始编译。
-#
+#  说明:
+#  1. 使用前，请确保仓库根目录下存在名为 'lede.config' 的 OpenWrt 配置文件。
+#     (该配置文件应包含你所有需要的包和设置)
+#  2. 此工作流默认开启 ccache 和下载缓存，二次编译速度将大幅提升。
+#  3. 编译完成后，将直接上传固件文件 (*.img.gz)，无需解压，下载即用。
+# =================================================================================
 
 name: Build OpenWrt
 
 on:
-  # 仅允许你手动在 Actions 页面触发工作流
   workflow_dispatch:
     inputs:
       ssh_action:
@@ -19,11 +19,11 @@ on:
         default: 'false'
 
 env:
-  # Lede 源码地址和分支
+  # OpenWrt 源码地址和分支
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   
-  # 你的 .config 文件名
+  # 你的 OpenWrt 配置文件名
   CONFIG_FILE: lede.config
   
   # （可选）你的自定义脚本文件名
@@ -31,7 +31,7 @@ env:
   DIY_PART2_SH: diy-part2.sh
   
   # 上传到 Artifacts 的固件名称
-  FIRMWARE_NAME: OpenWrt_firmware
+  UPLOAD_FIRMWARE_NAME: OpenWrt_firmware
   
   # 时区
   TZ: Asia/Shanghai
@@ -41,10 +41,10 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Checkout a.k.a. 检出仓库代码
+    - name: 检出仓库代码 (Checkout)
       uses: actions/checkout@v4
 
-    - name: Initialize build environment a.k.a. 初始化编译环境
+    - name: 初始化编译环境 (Initialize build environment)
       run: |
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
         sudo -E apt-get update
@@ -57,73 +57,86 @@ jobs:
         sudo -E apt-get -y autoremove --purge
         sudo -E apt-get clean
 
-    - name: Clone OpenWrt source code a.k.a. 克隆 Lede 源码
+    - name: 克隆 OpenWrt 源码 (Clone OpenWrt source code)
       run: |
         git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
+
+    - name: 设置编译缓存 (Setup build cache)
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/dl
+          openwrt/staging_dir
+        key: ${{ runner.os }}-openwrt-cache-${{ hashFiles('**/lede.config') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-cache-
+
+    - name: 加载自定义配置 (Load custom configuration)
+      run: |
+        # 检查配置文件是否存在，不存在则报错退出，避免使用默认配置浪费时间
+        if [ ! -f "${{ env.CONFIG_FILE }}" ]; then
+          echo "错误: 配置文件 ${{ env.CONFIG_FILE }} 未找到!"
+          exit 1
+        fi
+        mv ${{ env.CONFIG_FILE }} openwrt/.config
+        
+        # 如果存在自定义脚本，则赋予执行权限并执行
+        if [ -f ${{ env.DIY_PART1_SH }} ]; then
+          chmod +x ${{ env.DIY_PART1_SH }}
+          (cd openwrt && ../${{ env.DIY_PART1_SH }})
+        fi
+
+    - name: 更新并安装 Feeds (Update and install feeds)
+      run: |
         cd openwrt
         # 添加常用的 passwall 依赖
         echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
         echo "src-git passwall2 https://github.com/xiaorouji/openwrt-passwall2.git;main" >> feeds.conf.default
-        
-    - name: Load custom configuration a.k.a. 加载自定义配置和脚本
-      run: |
-        # 这一步会将你仓库根目录的 lede.config 文件，正确地移动到 openwrt 源码目录并重命名为 .config
-        if [ -e ${{ env.CONFIG_FILE }} ]; then
-          mv ${{ env.CONFIG_FILE }} openwrt/.config
-        fi
-        if [ -e ${{ env.DIY_PART1_SH }} ]; then
-          chmod +x ${{ env.DIY_PART1_SH }}
-          cd openwrt
-          ../${{ env.DIY_PART1_SH }}
-        fi
-
-    - name: Update and install feeds a.k.a. 更新并安装 Feeds
-      run: |
-        cd openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        if [ -e ../${{ env.DIY_PART2_SH }} ]; then
-          chmod +x ../${{ env.DIY_PART2_SH }}
-          ../${{ env.DIY_PART2_SH }}
+
+    - name: 执行自定义脚本 Part 2 (Run custom script Part 2)
+      run: |
+        if [ -f ${{ env.DIY_PART2_SH }} ]; then
+          chmod +x ${{ env.DIY_PART2_SH }}
+          (cd openwrt && ../${{ env.DIY_PART2_SH }})
         fi
 
-    # =================================================================
-    #   已删除 "Generate .config from diff" 步骤，因为它会覆盖用户的配置。
-    #   主编译命令 'make' 会自动处理 .config 文件。
-    # =================================================================
+    - name: 生成最终配置文件 (Generate final .config)
+      run: |
+        cd openwrt
+        # [关键步骤] 验证并补全 .config 文件，解决依赖问题
+        make defconfig
 
-    - name: SSH connection to runner a.k.a. SSH 连接到 Runner (用于调试)
+    - name: SSH 连接到 Runner (SSH connection to runner for debugging)
       uses: P3TERX/ssh2actions@v1.0.0
       if: ${{ github.event.inputs.ssh_action == 'true' }}
 
-    - name: Download packages a.k.a. 下载软件包
+    - name: 下载软件包 (Download packages)
       run: |
         cd openwrt
         make download -j$(nproc)
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: Compile the firmware a.k.a. 编译固件
+    - name: 编译固件 (Compile the firmware)
       id: compile
       run: |
         cd openwrt
-        echo -e "$(nproc) thread compile"
-        # make 命令会自动检查并使用 .config 文件
+        echo "使用 $(nproc) 个线程进行编译..."
         make -j$(nproc) V=s
-        echo "FIRMWARE_PATH=openwrt/bin/targets" >> $GITHUB_ENV
+        # 智能查找生成的固件文件路径，并设置为环境变量
+        FIRMWARE_FILE=$(find bin/targets -type f -name "*.img.gz" | head -n 1)
+        if [ -z "$FIRMWARE_FILE" ]; then
+          echo "错误: 未找到编译好的固件文件！"
+          exit 1
+        fi
+        echo "FIRMWARE_PATH=${FIRMWARE_FILE}" >> $GITHUB_ENV
+        echo "找到固件: ${FIRMWARE_FILE}"
 
-    - name: Organize files and upload artifacts a.k.a. 整理文件并上传
-      run: |
-        cd ${{ env.FIRMWARE_PATH }}/*/*
-        rm -rf packages
-        rm -rf feeds.buildinfo
-        rm -rf version.buildinfo
-        rm -rf sha256sums
-        rm -rf config.buildinfo
-        zip -r ${{ env.FIRMWARE_NAME }}.zip .
-
-    - name: Upload firmware to artifacts a.k.a. 上传固件到 Artifacts
+    - name: 上传固件到 Artifacts (Upload firmware to artifacts)
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ env.FIRMWARE_NAME }}
-        path: ${{ env.FIRMWARE_PATH }}/*/*/${{ env.FIRMWARE_NAME }}.zip
+        name: ${{ env.UPLOAD_FIRMWARE_NAME }}
+        # 直接上传找到的固件文件，而不是打包成 zip
+        path: ${{ env.FIRMWARE_PATH }}
