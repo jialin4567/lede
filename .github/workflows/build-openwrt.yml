@@ -1,15 +1,18 @@
 #
-# GitHub Actions - 手动编译 OpenWrt (v4 Artifacts 修正版)
+# GitHub Actions - 手动编译 OpenWrt (最终修正版)
 #
-# 说明:
-# 1. 在根目录创建 lede.config 文件，并放入你的 OpenWrt 配置。
-# 2. 在 GitHub -> Actions 页面，选择 "Build OpenWrt"，点击 "Run workflow" 即可开始编译。
+# 此版本已修复 actions/upload-artifact@v3 弃用问题，并配置为仅手动触发。
+#
+# 使用方法:
+# 1. 将此文件完整内容保存到你仓库的 .github/workflows/build-openwrt.yml。
+# 2. 确保你的 lede.config 文件在仓库的根目录。
+# 3. 前往 GitHub 仓库的 "Actions" 页面，选择 "Build OpenWrt"，点击 "Run workflow" 开始编译。
 #
 
 name: Build OpenWrt
 
 on:
-  # 允许你手动在 Actions 页面触发工作流
+  # 仅允许你手动在 Actions 页面触发工作流
   workflow_dispatch:
     inputs:
       ssh_action:
@@ -60,6 +63,7 @@ jobs:
       run: |
         git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
         cd openwrt
+        # 添加常用的 passwall 依赖
         echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
         echo "src-git passwall2 https://github.com/xiaorouji/openwrt-passwall2.git;main" >> feeds.conf.default
         
@@ -125,6 +129,7 @@ jobs:
         zip -r ${{ env.FIRMWARE_NAME }}.zip .
 
     - name: Upload firmware to artifacts a.k.a. 上传固件到 Artifacts
+      # 关键修复：使用 v4 版本来上传
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.FIRMWARE_NAME }}
