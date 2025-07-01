@@ -1,0 +1,129 @@
+#
+# GitHub Actions - 手动编译 OpenWrt
+#
+# 说明:
+# 1. 在根目录创建 lede.config 文件，并放入你的 OpenWrt 配置。
+# 2. 在 GitHub -> Actions 页面，选择 "Build OpenWrt"，点击 "Run workflow" 即可开始编译。
+#
+
+name: Build OpenWrt
+
+on:
+  # 允许你手动在 Actions 页面触发工作流
+  workflow_dispatch:
+    inputs:
+      ssh_action:
+        description: '在编译前通过 SSH 连接到 Runner (需要调试时填入 "true")'
+        required: false
+        default: 'false'
+
+env:
+  # Lede 源码地址和分支
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  
+  # 你的 .config 文件名
+  CONFIG_FILE: lede.config
+  
+  # （可选）你的自定义脚本文件名
+  DIY_PART1_SH: diy-part1.sh
+  DIY_PART2_SH: diy-part2.sh
+  
+  # 上传到 Artifacts 的固件名称
+  FIRMWARE_NAME: OpenWrt_firmware
+  
+  # 时区
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout a.k.a. 检出仓库代码
+      uses: actions/checkout@v4
+
+    - name: Initialize build environment a.k.a. 初始化编译环境
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get update
+        sudo -E apt-get -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+        bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib \
+        git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev \
+        libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libreadline-dev libssl-dev libtool lrzsz \
+        mkisofs msmtp nano quilt-utils rsync scons subversion swig texinfo uglifyjs upx-ucl unzip vim \
+        wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -y autoremove --purge
+        sudo -E apt-get clean
+
+    - name: Clone OpenWrt source code a.k.a. 克隆 Lede 源码
+      run: |
+        git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
+        cd openwrt
+        echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git;main" >> feeds.conf.default
+        echo "src-git passwall2 https://github.com/xiaorouji/openwrt-passwall2.git;main" >> feeds.conf.default
+        
+    - name: Load custom configuration a.k.a. 加载自定义配置和脚本
+      run: |
+        # 拷贝你的配置文件（lede.config），并将其重命名为 OpenWrt 编译所需的 .config 文件
+        [ -e ../${{ env.CONFIG_FILE }} ] && mv ../${{ env.CONFIG_FILE }} openwrt/.config
+        # 如果存在 diy-part1.sh 脚本，则运行它（通常用于添加自定义 feeds）
+        [ -e ../${{ env.DIY_PART1_SH }} ] && {
+          chmod +x ../${{ env.DIY_PART1_SH }}
+          cd openwrt
+          ../${{ env.DIY_PART1_SH }}
+        }
+
+    - name: Update and install feeds a.k.a. 更新并安装 Feeds
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        # 如果存在 diy-part2.sh 脚本，则运行它（通常用于修改软件包）
+        [ -e ../${{ env.DIY_PART2_SH }} ] && {
+          chmod +x ../${{ env.DIY_PART2_SH }}
+          ../${{ env.DIY_PART2_SH }}
+        }
+
+    - name: Generate .config from diff a.k.a. 生成 .config 文件
+      run: |
+        cd openwrt
+        make defconfig
+
+    - name: SSH connection to runner a.k.a. SSH 连接到 Runner (用于调试)
+      uses: P3TERX/ssh2actions@v1.0.0
+      if: ${{ github.event.inputs.ssh_action == 'true' }}
+
+    - name: Download packages a.k.a. 下载软件包
+      run: |
+        cd openwrt
+        make download -j$(nproc)
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+
+    - name: Compile the firmware a.k.a. 编译固件
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) V=s
+        # 为后续步骤设置输出变量
+        echo "FIRMWARE_PATH=openwrt/bin/targets" >> $GITHUB_ENV
+
+    - name: Organize files and upload artifacts a.k.a. 整理文件并上传
+      run: |
+        cd ${{ env.FIRMWARE_PATH }}/*/*
+        # 删除不需要的文件，减小大小
+        rm -rf packages
+        rm -rf feeds.buildinfo
+        rm -rf version.buildinfo
+        rm -rf sha256sums
+        rm -rf config.buildinfo
+        # 创建一个 ZIP 压缩包
+        zip -r ${{ env.FIRMWARE_NAME }}.zip .
+
+    - name: Upload firmware to artifacts a.k.a. 上传固件到 Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ env.FIRMWARE_NAME }}
+        path: ${{ env.FIRMWARE_PATH }}/*/*/${{ env.FIRMWARE_NAME }}.zip
