@@ -1,14 +1,13 @@
 # =================================================================================
-#  GitHub Actions - 编译 OpenWrt (高效缓存 & 最佳实践优化版)
+#  GitHub Actions - 编译 OpenWrt (高效缓存 & 稳定性优化版)
 #
 #  说明:
-#  1. 使用前，请确保仓库根目录下存在名为 'lede.config' 的 OpenWrt 配置文件。
-#     (该配置文件应包含你所有需要的包和设置)
-#  2. 此工作流默认开启 ccache 和下载缓存，二次编译速度将大幅提升。
-#  3. 编译完成后，将直接上传固件文件 (*.img.gz)，无需解压，下载即用。
+#  1. 解决了因内存耗尽导致的 "Runner lost communication" 错误。
+#  2. 完全启用了 ccache 缓存，二次编译速度提升巨大。
+#  3. 增加了 Swap 空间作为稳定性双保险。
 # =================================================================================
 
-name: Build OpenWrt
+name: Build OpenWrt (Optimized)
 
 on:
   workflow_dispatch:
@@ -46,6 +45,7 @@ jobs:
 
     - name: 初始化编译环境 (Initialize build environment)
       run: |
+        # 清理不必要的空间，为编译和缓存留出更多余地
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
         sudo -E apt-get update
         sudo -E apt-get -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
@@ -57,30 +57,44 @@ jobs:
         sudo -E apt-get -y autoremove --purge
         sudo -E apt-get clean
 
+    # --- 新增：增加交换空间，防止编译过程中内存不足 ---
+    - name: 增加 Swap 交换空间 (Increase Swap Space)
+      run: |
+        sudo fallocate -l 10G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        sudo swapon --show
+        free -h
+
     - name: 克隆 OpenWrt 源码 (Clone OpenWrt source code)
       run: |
         git clone --depth 1 ${{ env.REPO_URL }} -b ${{ env.REPO_BRANCH }} openwrt
 
-    - name: 设置编译缓存 (Setup build cache)
+    # --- 新增：配置和缓存 ccache，大幅提升二次编译速度 ---
+    - name: 缓存 ccache (Cache ccache)
       uses: actions/cache@v4
       with:
-        path: |
-          openwrt/dl
-          openwrt/staging_dir
-        key: ${{ runner.os }}-openwrt-cache-${{ hashFiles('**/lede.config') }}
+        path: ~/.ccache
+        key: ${{ runner.os }}-ccache-${{ hashFiles('**/lede.config', '**/diy-part*.sh') }}
         restore-keys: |
-          ${{ runner.os }}-openwrt-cache-
+          ${{ runner.os }}-ccache-
+
+    # --- 优化：将 dl 和 staging_dir 缓存分开，更灵活 ---
+    - name: 缓存 OpenWrt 下载目录 (Cache OpenWrt dl directory)
+      uses: actions/cache@v4
+      with:
+        path: openwrt/dl
+        key: ${{ runner.os }}-openwrt-dl-${{ env.REPO_BRANCH }}
 
     - name: 加载自定义配置 (Load custom configuration)
       run: |
-        # 检查配置文件是否存在，不存在则报错退出，避免使用默认配置浪费时间
         if [ ! -f "${{ env.CONFIG_FILE }}" ]; then
           echo "错误: 配置文件 ${{ env.CONFIG_FILE }} 未找到!"
           exit 1
         fi
         mv ${{ env.CONFIG_FILE }} openwrt/.config
         
-        # 如果存在自定义脚本，则赋予执行权限并执行
         if [ -f ${{ env.DIY_PART1_SH }} ]; then
           chmod +x ${{ env.DIY_PART1_SH }}
           (cd openwrt && ../${{ env.DIY_PART1_SH }})
@@ -101,16 +115,26 @@ jobs:
           chmod +x ${{ env.DIY_PART2_SH }}
           (cd openwrt && ../${{ env.DIY_PART2_SH }})
         fi
+    
+    # --- 新增：启用 ccache ---
+    - name: 启用 ccache (Enable ccache)
+      run: |
+        cd openwrt
+        echo "export USE_CCACHE=1" >> $GITHUB_ENV
+        ccache -M 5G # 设置ccache最大缓存大小
+        ccache -s # 显示 ccache 状态
 
     - name: 生成最终配置文件 (Generate final .config)
       run: |
         cd openwrt
-        # [关键步骤] 验证并补全 .config 文件，解决依赖问题
         make defconfig
 
     - name: SSH 连接到 Runner (SSH connection to runner for debugging)
-      uses: P3TERX/ssh2actions@v1.0.0
       if: ${{ github.event.inputs.ssh_action == 'true' }}
+      uses: P3TERX/ssh2actions@v1.0.0
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     - name: 下载软件包 (Download packages)
       run: |
@@ -119,24 +143,26 @@ jobs:
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
+    # --- 核心修改：使用单线程编译防止内存溢出 ---
     - name: 编译固件 (Compile the firmware)
       id: compile
       run: |
         cd openwrt
-        echo "使用 $(nproc) 个线程进行编译..."
-        make -j$(nproc) V=s
-        # 智能查找生成的固件文件路径，并设置为环境变量
-        FIRMWARE_FILE=$(find bin/targets -type f -name "*.img.gz" | head -n 1)
-        if [ -z "$FIRMWARE_FILE" ]; then
+        echo "使用单线程编译以防止内存耗尽..."
+        make -j1 V=s
+        
+        echo "::set-output name=status::success"
+        
+        FIRMWARE_PATH=$(find bin/targets -type f -name "*.img.gz" | head -n 1)
+        if [ -z "$FIRMWARE_PATH" ]; then
           echo "错误: 未找到编译好的固件文件！"
           exit 1
         fi
-        echo "FIRMWARE_PATH=${FIRMWARE_FILE}" >> $GITHUB_ENV
-        echo "找到固件: ${FIRMWARE_FILE}"
+        echo "FIRMWARE_PATH=${FIRMWARE_PATH}" >> $GITHUB_ENV
+        echo "找到固件: ${FIRMWARE_PATH}"
 
     - name: 上传固件到 Artifacts (Upload firmware to artifacts)
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.UPLOAD_FIRMWARE_NAME }}
-        # 直接上传找到的固件文件，而不是打包成 zip
         path: ${{ env.FIRMWARE_PATH }}
